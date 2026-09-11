@@ -471,6 +471,110 @@ def test_edit_mode_prefix(tmp: Path):
     check("前缀写错时不调 LLM", "edit" not in captured3)
 
 
+def test_fix_emoji_command(tmp: Path):
+    print("[修复表情 命令]")
+    plugin = make_plugin(None, tmp)
+    plugin.db.set(
+        UserProfile(
+            user_id="123",
+            nickname="小明",
+            clone_prompt="说话常带/擦汗",
+            portrait="画像：爱/偷笑",
+        )
+    )
+    plugin.db.set(
+        UserProfile(user_id="456", nickname="小红", clone_prompt="已经用 😅 了")
+    )
+
+    out = collect(plugin.fix_emoji_in_personas(FakeEvent("修复表情", [Plain("修复表情")])))
+    text = out[0][1]
+    check("提示修复了 1 人", "已把 1 份" in text, text)
+    check("人格已转 emoji", plugin.db.get("123").clone_prompt == "说话常带😅")
+    check("画像已转 emoji", plugin.db.get("123").portrait == "画像：爱🤭")
+    check("无需修复的保持原样", plugin.db.get("456").clone_prompt == "已经用 😅 了")
+    check("落库（重新读盘仍在）", "😅" in (plugin.db._load()["123"].clone_prompt))
+
+    # 没有需要修复的场合
+    out2 = collect(plugin.fix_emoji_in_personas(FakeEvent("修复表情", [Plain("修复表情")])))
+    check("再次执行提示无需修复", "没有需要修复" in out2[0][1], out2[0][1])
+
+
+def test_emoji_normalization(tmp: Path):
+    print("[表情处理]")
+    from portrayal_plugin.core.emoji import (
+        face_segment_to_emoji,
+        normalize_bot_emoji,
+        slash_emoji_to_emoji,
+    )
+
+    # 斜杠表情 -> 真 emoji（用户实际遇到的那些名字）
+    check("擦汗转 emoji", slash_emoji_to_emoji("/擦汗") == "😅", slash_emoji_to_emoji("/擦汗"))
+    check("冷汗转 emoji", slash_emoji_to_emoji("/冷汗") == "😰")
+    check("握手转 emoji", slash_emoji_to_emoji("/握手") == "🤝")
+    check("捂脸转 emoji", slash_emoji_to_emoji("/捂脸") == "🤦")
+    check("长名优先（偷笑一下）", slash_emoji_to_emoji("/偷笑一下") == "🤭")
+    check("句中替换", slash_emoji_to_emoji("好尴尬/擦汗算了") == "好尴尬😅算了")
+    check("后跟标点", slash_emoji_to_emoji("/擦汗，然后") == "😅，然后")
+    check("后跟空格", slash_emoji_to_emoji("/擦汗 好了") == "😅 好了")
+
+    # 真命令绝不能被误伤
+    for raw in ("/reset", "/new 对话", "/help", "用 /reset 重开", "路径 /usr/bin", "/new123"):
+        check(f"命令原样保留 {raw!r}", slash_emoji_to_emoji(raw) == raw, slash_emoji_to_emoji(raw))
+    check("无斜杠时直通", slash_emoji_to_emoji("普通文本") == "普通文本")
+    check("后接中文仍算表情", slash_emoji_to_emoji("/擦汗了没") == "😅了没", slash_emoji_to_emoji("/擦汗了没"))
+
+    # face / mface 段
+    check("face id 转 emoji", face_segment_to_emoji("face", {"id": "84"}) == "😅")
+    check("face id 为 int 也行", face_segment_to_emoji("face", {"id": 76}) == "👍")
+    check("未收录 id 返回空（不塞错表情）", face_segment_to_emoji("face", {"id": "99999"}) == "")
+    check("mface 按名字", face_segment_to_emoji("mface", {"name": "捂脸"}) == "🤦")
+    check("mface 无名返回空", face_segment_to_emoji("mface", {"emoji_id": "1"}) == "")
+    check("脏数据不炸", face_segment_to_emoji("face", None) == "")
+
+    # CQ 码
+    check("CQ face 码转换", normalize_bot_emoji("[CQ:face,id=84]") == "😅", normalize_bot_emoji("[CQ:face,id=84]"))
+
+    # 端到端：抓取时表情段不再被丢弃
+    plugin = make_plugin(None, tmp)
+    from portrayal_plugin.core.message import MessageManager
+
+    mgr = MessageManager(plugin.cfg)
+    mgr.clear_cache()
+    page = [
+        {
+            "message_id": 1,
+            "sender": {"user_id": "100"},
+            "message": [
+                {"type": "text", "data": {"text": "你好"}},
+                {"type": "face", "data": {"id": "84"}},
+            ],
+        },
+        {
+            "message_id": 2,
+            "sender": {"user_id": "100"},
+            "message": [{"type": "face", "data": {"id": "76"}}],
+        },
+        {
+            "message_id": 3,
+            "sender": {"user_id": "100"},
+            "message": [{"type": "image", "data": {"file": "x.jpg"}}],
+        },
+    ]
+    mgr._collect_messages("999", page)
+    texts = mgr._get_user_cache("999", "100")
+    check("文本+表情一起入库", texts == ["你好😅", "👍"], str(texts))
+    check("纯图片消息不入库", len(texts) == 2)
+
+    # 入库前的人格文本规范化（ChatLab 写入的 /擦汗）
+    from portrayal_plugin.core.persona_service import normalize_persona_text
+
+    check(
+        "人格文本里的斜杠表情被转换",
+        normalize_persona_text("说话常带/擦汗，爱/偷笑") == "说话常带😅，爱🤭",
+        normalize_persona_text("说话常带/擦汗，爱/偷笑"),
+    )
+
+
 def test_message_scan_dedup(tmp: Path):
     """翻页游标重叠时同一条消息会被重复返回，必须按消息 ID 去重，
     且「扫描条数」要报真实值（不能按「轮数 × 每页条数」估算）"""
@@ -545,6 +649,7 @@ def test_message_scan_dedup(tmp: Path):
         ' "group_cursors": {"999": 123}}',
         encoding="utf-8",
     )
+    # 注意：这是「消息缓存」文件，与 portrayal.json 的 schema 无关
     from portrayal_plugin.core.message import MessageManager as MM
 
     legacy = MM(plugin.cfg)
@@ -785,6 +890,9 @@ def test_portrait_merge(tmp: Path):
             from_cache = False
             count = 2
             is_empty = False
+
+            def normalized_texts(self):
+                return list(self.texts)
 
         return R()
 
@@ -1055,6 +1163,8 @@ def main():
     test_parsing(tmp)
     test_edit_persona(tmp)
     test_edit_mode_prefix(tmp)
+    test_fix_emoji_command(tmp)
+    test_emoji_normalization(tmp)
     test_message_scan_dedup(tmp)
     test_markdown_to_plain()
     test_switch_named_persona(tmp)
