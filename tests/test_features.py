@@ -471,6 +471,90 @@ def test_edit_mode_prefix(tmp: Path):
     check("前缀写错时不调 LLM", "edit" not in captured3)
 
 
+def test_message_scan_dedup(tmp: Path):
+    """翻页游标重叠时同一条消息会被重复返回，必须按消息 ID 去重，
+    且「扫描条数」要报真实值（不能按「轮数 × 每页条数」估算）"""
+    print("[群消息扫描去重]")
+    plugin = make_plugin(None, tmp)
+    cfg = make_config(
+        message={
+            "default_query_rounds": 3,
+            "max_msg_count": 500,
+            "cache_ttl_min": 30,
+            "protected_user_ids": [],
+        }
+    )
+    # 直接构造 MessageManager，隔离测试扫描逻辑
+    from portrayal_plugin.core.message import MessageManager
+
+    mgr = MessageManager(plugin.cfg)
+    mgr.clear_cache()
+
+    def msg(mid, uid, text):
+        return {
+            "message_id": mid,
+            "sender": {"user_id": uid},
+            "message": [{"type": "text", "data": {"text": text}}],
+        }
+
+    # 第 2 页与第 1 页有 2 条重叠（游标重叠的真实场景），并有一页内重复
+    pages = [
+        [msg(1, "100", "a"), msg(2, "100", "b"), msg(3, "200", "c"), msg(3, "200", "c")],
+        [msg(2, "100", "b"), msg(3, "200", "c"), msg(4, "100", "d")],
+        [],
+    ]
+    calls = {"n": 0}
+
+    class FakeApi:
+        async def call_action(self, action, **kwargs):
+            idx = min(calls["n"], len(pages) - 1)
+            calls["n"] += 1
+            return {"messages": pages[idx]}
+
+    class FakeBot:
+        api = FakeApi()
+
+    class FakeEv:
+        def get_group_id(self):
+            return "999"
+
+        bot = FakeBot()
+
+    result = asyncio.run(mgr.get_user_texts(FakeEv(), "100", max_rounds=3))
+
+    check("提取到的条数按唯一消息计", len(result.texts) == 3, str(result.texts))
+    check("目标用户内容正确", result.texts == ["a", "b", "d"], str(result.texts))
+    check(
+        "扫描条数是真实值而非估算",
+        result.scanned_messages == 5,
+        f"scanned={result.scanned_messages}（估算会得到 3×200=600）",
+    )
+    check("total 与 texts 一致（不再出现 261>200）", result.count == len(result.texts))
+
+    # 再次调用：缓存命中，应直接返回且不再扫描
+    calls["n"] = 0
+    again = asyncio.run(mgr.get_user_texts(FakeEv(), "100", max_rounds=3))
+    check("二次调用不再重复计数", len(again.texts) == 3, str(again.texts))
+    check("二次调用标记来自缓存", again.from_cache is True)
+
+    # 旧缓存文件（无 ids 字段）也能正常加载
+    cache_file = plugin.cfg.cache_dir / "message_cache.json"
+    cache_file.parent.mkdir(parents=True, exist_ok=True)
+    cache_file.write_text(
+        '{"users": {"999:100": {"texts": ["old1", "old2"], "timestamp": 9999999999}},'
+        ' "group_cursors": {"999": 123}}',
+        encoding="utf-8",
+    )
+    from portrayal_plugin.core.message import MessageManager as MM
+
+    legacy = MM(plugin.cfg)
+    got = legacy._get_user_cache("999", "100")
+    check("旧缓存（无 ids）可加载", got == ["old1", "old2"], str(got))
+    cached = legacy._user_cache["999:100"]
+    check("旧缓存 ids 补成等长空串", len(cached.ids) == len(cached.texts) == 2, str(cached.ids))
+    check("旧缓存追加后仍对齐", cached.add("new", "555") and cached.texts[-1] == "new")
+
+
 def test_markdown_to_plain():
     print("[聊天框纯文本化]")
     from portrayal_plugin.core.chat_text import markdown_to_plain as f
@@ -971,6 +1055,7 @@ def main():
     test_parsing(tmp)
     test_edit_persona(tmp)
     test_edit_mode_prefix(tmp)
+    test_message_scan_dedup(tmp)
     test_markdown_to_plain()
     test_switch_named_persona(tmp)
     test_view_clone(tmp)
