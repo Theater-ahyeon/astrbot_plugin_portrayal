@@ -73,9 +73,12 @@ Remove-Item -Recurse -Force (Join-Path $Live "core\__pycache__") -ErrorAction Si
 Write-Host "[2/5] 已覆盖部署到 $Live"
 
 # 3) 校验
-$check = @("main.py", "plugin_api.py", "core\config.py", "core\llm.py", "core\message.py",
-    "core\persona_service.py", "core\bot_identity.py", "_conf_schema.json", "builtin_prompts.yaml",
+$check = @("main.py", "plugin_api.py", "_conf_schema.json", "builtin_prompts.yaml",
     "metadata.yaml", "pages\dashboard\index.html", "pages\dashboard\app.js", "pages\dashboard\app.css")
+# core 下所有 py 都要校验，避免新增模块（如 chat_text.py）漏同步
+Get-ChildItem (Join-Path $Source "core") -File -Filter *.py | ForEach-Object {
+    $check += "core\" + $_.Name
+}
 $bad = 0
 foreach ($f in $check) {
     $a = Join-Path $Source $f
@@ -88,7 +91,11 @@ if ($bad -gt 0) { throw "有 $bad 个文件校验失败" }
 Write-Host "[3/5] 校验通过"
 
 # 4) 语法自检
-& $AstrBotPython -m py_compile (Join-Path $Live "main.py") (Join-Path $Live "plugin_api.py") (Join-Path $Live "core\persona_service.py") (Join-Path $Live "core\bot_identity.py")
+$compileTargets = @((Join-Path $Live "main.py"), (Join-Path $Live "plugin_api.py"))
+Get-ChildItem (Join-Path $Live "core") -File -Filter *.py | ForEach-Object {
+    $compileTargets += $_.FullName
+}
+& $AstrBotPython -m py_compile @compileTargets
 if ($LASTEXITCODE -ne 0) { throw "py_compile 未通过" }
 Write-Host "[4/5] 语法自检通过"
 

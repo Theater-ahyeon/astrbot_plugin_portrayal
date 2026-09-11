@@ -471,6 +471,42 @@ def test_edit_mode_prefix(tmp: Path):
     check("前缀写错时不调 LLM", "edit" not in captured3)
 
 
+def test_markdown_to_plain():
+    print("[聊天框纯文本化]")
+    from portrayal_plugin.core.chat_text import markdown_to_plain as f
+
+    check("标题去掉 #", f("## 第一阶段：画像") == "第一阶段：画像")
+    check("多级标题", f("### 1. 最佳匹配类型") == "1. 最佳匹配类型")
+    check("加粗去掉 **", f("**核心性格**：内向") == "核心性格：内向")
+    check("下划线加粗", f("__重点__内容") == "重点内容")
+    check("斜体去掉 *", f("*温和*一点") == "温和一点")
+    check("删除线", f("~~不粘人~~") == "不粘人")
+    check("行内代码", f("用 `reset` 命令") == "用 reset 命令")
+    check("代码围栏保留内容", f('```json\n{"a": 1}\n```') == '{"a": 1}')
+    check("分隔线删除", f("上文\n---\n下文") == "上文\n\n下文")
+    check("无序列表转圆点", f("- 项目一") == "• 项目一")
+    check("有序列表保留编号", f("1. 第一项") == "1. 第一项")
+    check("嵌套列表压平（聊天框不保留前导空格）", f("  - 子项") == "• 子项")
+    check("引用转竖线", f("> 注意：基于记录") == "｜注意：基于记录")
+    check("链接保留文字", f("[示例](https://x.com)") == "示例")
+    check("图片删除", f("![图](https://x.com/a.png)") == "")
+    check(
+        "表格转竖线分隔",
+        f("| 维度 | 评分 |\n| --- | --- |\n| 情绪 | 8 |") == "维度 ｜ 评分\n情绪 ｜ 8",
+    )
+    check("纯文本不变", f("普通文本\n第二行") == "普通文本\n第二行")
+    check("空值安全", f("") == "" and f(None) == "")
+
+    sample = (
+        "## 标题\n\n1. **核心性格**：内向\n\n- **推荐画像**：*温和* 且 ~~不粘人~~\n"
+        "\n> 备注\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n"
+    )
+    once = f(sample)
+    check("幂等", f(once) == once)
+    check("不复现 Markdown 符号", not any(k in once for k in ("**", "## ", "| ---")))
+    check("保留分节结构", "标题" in once and "• 推荐画像" in once)
+
+
 def test_switch_named_persona(tmp: Path):
     print("[切换人格 <人格名>]")
     plugin = make_plugin(None, tmp)
@@ -935,6 +971,7 @@ def main():
     test_parsing(tmp)
     test_edit_persona(tmp)
     test_edit_mode_prefix(tmp)
+    test_markdown_to_plain()
     test_switch_named_persona(tmp)
     test_view_clone(tmp)
     test_portrait_merge(tmp)
