@@ -126,13 +126,16 @@ def test_service_edits(tmp: Path):
         except PersonaError as e:
             check(f"{label} 追加/替换被拒", "暂无该用户档案" in str(e))
 
+    # 空人格时：append 必须报错（无处追加）；replace 是整段替换，应当直接写入
     seed(plugin, **{"5": "   "})
-    for mode in ("append", "replace"):
-        try:
-            svc.apply_edit("5", mode, "x")
-            check(f"空人格 {mode} 应报错", False)
-        except PersonaError as e:
-            check(f"空人格 {mode} 被拒", "暂无可用的克隆人格" in str(e))
+    try:
+        svc.apply_edit("5", "append", "x")
+        check("空人格 append 应报错", False)
+    except PersonaError as e:
+        check("空人格 append 被拒", "还没有克隆人格" in str(e), str(e))
+
+    svc.apply_edit("5", "replace", "整段写入")
+    check("空人格 replace 直接写入", plugin.db.get("5").clone_prompt == "整段写入")
 
     for bad in ("", "abc"):
         try:

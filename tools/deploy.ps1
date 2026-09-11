@@ -90,6 +90,20 @@ foreach ($f in $check) {
 if ($bad -gt 0) { throw "有 $bad 个文件校验失败" }
 Write-Host "[3/5] 校验通过"
 
+# 3.5) 元数据名对齐目标插件目录名
+# AstrBot 用 metadata.name 作为插件标识；若与目录名不一致，
+# 插件列表与配置会各显示一份，且面板路由前缀容易对不上。
+# 放在校验之后，避免与源文件的哈希校验冲突。
+$metaPath = Join-Path $Live "metadata.yaml"
+if (Test-Path $metaPath) {
+    $metaText = Get-Content $metaPath -Raw -Encoding UTF8
+    $metaNew = [regex]::Replace($metaText, '(?m)^name:\s*\S+', "name: $PluginName")
+    if ($metaNew -ne $metaText) {
+        [IO.File]::WriteAllText($metaPath, $metaNew, (New-Object Text.UTF8Encoding($false)))
+        Write-Host "       metadata.name 已对齐为 $PluginName"
+    }
+}
+
 # 4) 语法自检
 $compileTargets = @((Join-Path $Live "main.py"), (Join-Path $Live "plugin_api.py"))
 Get-ChildItem (Join-Path $Live "core") -File -Filter *.py | ForEach-Object {

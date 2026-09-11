@@ -411,7 +411,7 @@ def test_edit_persona(tmp: Path):
     plugin5 = make_plugin(None, tmp)
     plugin5.db.set(UserProfile(user_id="123", nickname="小明", clone_prompt=""))
     out = collect(plugin5.edit_persona(FakeEvent("改人格 @u 追加：x", [At("123"), Plain(" 追加：x")])))
-    check("追加 无旧人格被拒", any("暂无可用的克隆人格" in t for _, t in out))
+    check("追加 无旧人格被拒", any("还没有克隆人格" in t for _, t in out), str(out))
 
     # --- 追加空内容
     out = collect(plugin5.edit_persona(FakeEvent("改人格 @u 追加：", [At("123"), Plain(" 追加：")])))
@@ -694,6 +694,67 @@ def test_markdown_to_plain():
     check("幂等", f(once) == once)
     check("不复现 Markdown 符号", not any(k in once for k in ("**", "## ", "| ---")))
     check("保留分节结构", "标题" in once and "• 推荐画像" in once)
+
+
+def test_reset_on_empty_clone(tmp: Path):
+    """重置是整段替换，**不应**要求已有旧人格
+
+    真实反馈：克隆被中途打断（如插件重载）后 clone_prompt 为空，
+    此时用「改人格 @群友 重置：<完整人格>」应当直接写入，而不是报
+    「该用户暂无可用的克隆人格」。
+    """
+    print("[重置 不要求旧人格]")
+    plugin = make_plugin(None, tmp)
+    # 典型场景：从画像分析来的档案，portrait 有内容但 clone_prompt 为空
+    plugin.db.set(
+        UserProfile(user_id="123", nickname="fa_555", portrait="旧画像内容")
+    )
+
+    ev = FakeEvent(
+        "改人格 @用户 重置:全新人格正文",
+        [Plain("改人格 "), At("123"), Plain(" 重置:全新人格正文")],
+    )
+    out = collect(plugin.edit_persona(ev))
+    text = out[0][1]
+    check("重置成功（不再报暂无克隆人格）", "已重置" in text, text)
+    prof = plugin.db.get("123")
+    check("人格已写入", prof.clone_prompt == "全新人格正文", prof.clone_prompt)
+    check("原昵称保留", prof.nickname == "fa_555")
+    check("画像未被覆盖", prof.portrait == "旧画像内容", prof.portrait)
+    check("记录了更新时刻", bool(prof.persona_updated_at))
+
+    # 半角冒号同样可用
+    ev2 = FakeEvent(
+        "改人格 @用户 重置:半角冒号写入",
+        [Plain("改人格 "), At("123"), Plain(" 重置:半角冒号写入")],
+    )
+    collect(plugin.edit_persona(ev2))
+    check("半角冒号也能重置", plugin.db.get("123").clone_prompt == "半角冒号写入")
+
+    # append 仍然要求已有内容（这是合理的）
+    plugin.db.set(UserProfile(user_id="456", nickname="小明"))
+    ev3 = FakeEvent(
+        "改人格 @用户 追加:补充一句",
+        [Plain("改人格 "), At("456"), Plain(" 追加:补充一句")],
+    )
+    out3 = collect(plugin.edit_persona(ev3))
+    check("追加仍要求已有内容", "还没有克隆人格" in out3[0][1], out3[0][1])
+    check("追加失败时不改库", not (plugin.db.get("456").clone_prompt or ""))
+
+    # 重置没有任何档案时：自动拉资料建档（原有行为）
+    async def fake_stranger(user_id, no_cache=False):
+        return {"nickname": "新来的", "sex": "男"}
+
+    plugin_no_profile = make_plugin(None, tmp)
+    plugin_no_profile.context.__dict__.setdefault("_x", None)
+    ev4 = FakeEvent(
+        "改人格 @用户 重置:给新人建档",
+        [Plain("改人格 "), At("789"), Plain(" 重置:给新人建档")],
+    )
+    ev4.bot.get_stranger_info = fake_stranger
+    out4 = collect(plugin_no_profile.edit_persona(ev4))
+    check("无档案时重置会自动建档", "已写入" in out4[0][1], out4[0][1])
+    check("新档已写入人格", plugin_no_profile.db.get("789").clone_prompt == "给新人建档")
 
 
 def test_switch_named_persona(tmp: Path):
@@ -1167,6 +1228,7 @@ def main():
     test_emoji_normalization(tmp)
     test_message_scan_dedup(tmp)
     test_markdown_to_plain()
+    test_reset_on_empty_clone(tmp)
     test_switch_named_persona(tmp)
     test_view_clone(tmp)
     test_portrait_merge(tmp)
