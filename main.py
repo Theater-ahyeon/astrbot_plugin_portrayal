@@ -70,9 +70,13 @@ class PortrayalPlugin(Star):
         self.persona_service = PersonaService(
             self.cfg, self.db, self.llm, self.msg, self.entry_service
         )
-        # 注册 WebUI 面板后端（/api/plug/astrbot_plugin_portrayal/...）
+        # 注册 WebUI 面板后端（/api/plug/<运行期插件名>/...）
         try:
-            self.page_api = register_plugin_page_api(context, self)
+            from .core.config import resolve_plugin_name
+
+            self.page_api = register_plugin_page_api(
+                context, self, plugin_name=resolve_plugin_name()
+            )
         except Exception as e:
             self.page_api = None
             logger.warning(f"注册 WebUI 面板接口失败（不影响聊天命令）：{e}")

@@ -68,8 +68,10 @@ async def _payload() -> dict[str, Any]:
 class PluginPageAPI:
     """面板后端"""
 
-    def __init__(self, plugin: Any):
+    def __init__(self, plugin: Any, plugin_name: str | None = None):
         self.plugin = plugin
+        # 运行期插件名（决定面板路由前缀）；缺省用常量
+        self.plugin_name = (plugin_name or PLUGIN_NAME).strip("/") or PLUGIN_NAME
 
     @property
     def personas(self) -> PersonaService:
@@ -91,10 +93,10 @@ class PluginPageAPI:
         ]
         for route, handler_name, methods in routes:
             context.register_web_api(
-                f"/{PLUGIN_NAME}{route}",
+                f"/{self.plugin_name}{route}",
                 self._logged(handler_name, getattr(self, handler_name)),
                 methods,
-                f"Plugin Page: {PLUGIN_NAME}{route}",
+                f"Plugin Page: {self.plugin_name}{route}",
             )
 
     def _logged(self, name: str, handler):
@@ -300,7 +302,7 @@ class PluginPageAPI:
             paths = []
         return _ok(
             {
-                "plugin": PLUGIN_NAME,
+                "plugin": self.plugin_name,
                 "request_path": request.path,
                 "path_params": dict(request.path_params),
                 "query": dict(request.query),
@@ -322,8 +324,13 @@ class PluginPageAPI:
         return _ok({"received": True})
 
 
-def register_plugin_page_api(context, plugin: Any) -> PluginPageAPI:
-    """注册面板后端并返回实例（便于测试）"""
-    api = PluginPageAPI(plugin)
+def register_plugin_page_api(
+    context, plugin: Any, plugin_name: str | None = None
+) -> PluginPageAPI:
+    """注册面板后端并返回实例（便于测试）
+
+    plugin_name 传运行期的真实插件目录名：本插件被改名分发时，面板路由跟着走。
+    """
+    api = PluginPageAPI(plugin, plugin_name=plugin_name)
     api.register(context)
     return api

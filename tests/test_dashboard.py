@@ -362,6 +362,11 @@ def test_page_api(tmp: Path):
     check("cache 信息", out["data"]["messages"] == 2 and out["data"]["groups"] == 1)
 
 
+def _plugin_name() -> str:
+    """当前插件目录名（改名分发时路由会跟着变）"""
+    return Path(plugin_main.__file__).resolve().parents[1].name
+
+
 def test_registration_paths():
     print("[面板路由注册]")
     registered: list[tuple] = []
@@ -371,29 +376,32 @@ def test_registration_paths():
             registered.append((route, handler, methods, desc))
 
     fake_plugin = type("P", (), {"persona_service": None})()
-    plugin_main.register_plugin_page_api(FakeContext(), fake_plugin)
+    plugin_main.register_plugin_page_api(
+        FakeContext(), fake_plugin, plugin_name=_plugin_name()
+    )
 
     routes = {r[0]: r for r in registered}
+    name = _plugin_name()
     expected = {
-        "/astrbot_plugin_portrayal/overview",
-        "/astrbot_plugin_portrayal/users",
-        "/astrbot_plugin_portrayal/user/<user_id>",
-        "/astrbot_plugin_portrayal/update",
-        "/astrbot_plugin_portrayal/generate",
-        "/astrbot_plugin_portrayal/cache",
-        "/astrbot_plugin_portrayal/cached-users",
-        "/astrbot_plugin_portrayal/ping",
-        "/astrbot_plugin_portrayal/diag",
+        f"/{name}/overview",
+        f"/{name}/users",
+        f"/{name}/user/<user_id>",
+        f"/{name}/update",
+        f"/{name}/generate",
+        f"/{name}/cache",
+        f"/{name}/cached-users",
+        f"/{name}/ping",
+        f"/{name}/diag",
     }
     check("路由 全覆盖", expected.issubset(set(routes)), str(sorted(routes)))
     check("路由 方法齐全", all(r[2] for r in registered))
     check(
         "路由 update 仅 POST",
-        routes["/astrbot_plugin_portrayal/update"][2] == ["POST"],
+        routes[f"/{name}/update"][2] == ["POST"],
     )
     check(
         "路由 注册了插件名前缀",
-        all(r[0].startswith("/astrbot_plugin_portrayal/") for r in registered),
+        all(r[0].startswith(f"/{name}/") for r in registered),
     )
 
 
@@ -424,35 +432,36 @@ def test_route_matching_with_real_host():
 
     fake_plugin = type("P", (), {"persona_service": None})()
     ctx = FakeContext()
-    plugin_main.register_plugin_page_api(ctx, fake_plugin)
+    plugin_main.register_plugin_page_api(ctx, fake_plugin, plugin_name=_plugin_name())
     apis = ctx.registered_web_apis
 
+    name = _plugin_name()
     check(
         "user 路由被编译成路径参数",
-        _plugin_api_route_pattern("/astrbot_plugin_portrayal/user/<user_id>")
-        == "/astrbot_plugin_portrayal/user/(?P<user_id>[^/]+)",
+        _plugin_api_route_pattern(f"/{name}/user/<user_id>")
+        == f"/{name}/user/(?P<user_id>[^/]+)",
     )
 
-    hit = _match_registered_web_api(apis, "/astrbot_plugin_portrayal/user/123456", "GET")
+    hit = _match_registered_web_api(apis, f"/{name}/user/123456", "GET")
     check("GET user/123456 命中", hit is not None and hit[1] == {"user_id": "123456"})
 
-    hit = _match_registered_web_api(apis, "/astrbot_plugin_portrayal/overview", "GET")
+    hit = _match_registered_web_api(apis, f"/{name}/overview", "GET")
     check("GET overview 命中", hit is not None and hit[1] == {})
 
-    hit = _match_registered_web_api(apis, "/astrbot_plugin_portrayal/update", "POST")
+    hit = _match_registered_web_api(apis, f"/{name}/update", "POST")
     check("POST update 命中", hit is not None)
 
     check(
         "GET update 被方法过滤掉",
-        _match_registered_web_api(apis, "/astrbot_plugin_portrayal/update", "GET") is None,
+        _match_registered_web_api(apis, f"/{name}/update", "GET") is None,
     )
     check(
         "空 user_id 不命中",
-        _match_registered_web_api(apis, "/astrbot_plugin_portrayal/user/", "GET") is None,
+        _match_registered_web_api(apis, f"/{name}/user/", "GET") is None,
     )
     check(
         "cached-users 命中",
-        _match_registered_web_api(apis, "/astrbot_plugin_portrayal/cached-users", "GET")
+        _match_registered_web_api(apis, f"/{name}/cached-users", "GET")
         is not None,
     )
 

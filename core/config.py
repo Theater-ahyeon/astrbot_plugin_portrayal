@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, MutableMapping
+import shutil
+import sys
+import inspect
 from pathlib import Path
 from types import MappingProxyType, UnionType
 from typing import Any, Union, get_args, get_origin, get_type_hints
@@ -48,14 +51,57 @@ def render_template(template: str, **kwargs: Any) -> str:
     return text
 
 
+def _safe_type_hints(cls: type) -> dict[str, Any]:
+    """解析类注解，兼容「插件模块未注册进 sys.modules」的加载方式
+
+    AstrBot 以 `data.plugins.<插件>.<模块>` 这样的名字动态加载插件模块，但**不注册**
+    进 `sys.modules`；此时 `typing.get_type_hints()` 解析前置引用
+    （如 `llm: LLMConfig`）会抛 NameError，导致配置读取整体失败。
+    这里在必要时把模块临时登记进 `sys.modules` 再解析。
+    """
+    try:
+        return get_type_hints(cls)
+    except NameError:
+        module = sys.modules.get(cls.__module__)
+        if module is None:
+            module = inspect.getmodule(cls)
+        if module is None:
+            raise
+        registered = cls.__module__ in sys.modules
+        if not registered:
+            sys.modules[cls.__module__] = module
+        try:
+            return get_type_hints(cls)
+        finally:
+            if not registered:
+                sys.modules.pop(cls.__module__, None)
+
+
 class ConfigNode:
 
     _SCHEMA_CACHE: dict[type, dict[str, type]] = {}
     _FIELDS_CACHE: dict[type, set[str]] = {}
+    # 本模块的 globals（在模块末尾填充），用于解析前置引用
+    _MODULE_GLOBALS: dict[str, Any] | None = None
+
+    @classmethod
+    def _resolve_globals(cls) -> dict[str, Any]:
+        """取本类所在模块的全局命名空间
+
+        AstrBot 以 `data.plugins.<插件>.<模块>` 这类名字动态加载插件模块，却**不注册**
+        进 `sys.modules`。此时 `typing.get_type_hints()` 解析前置引用（如 `llm: LLMConfig`）
+        会抛 NameError，整个配置读取跟着失败 —— 所以这里显式把 globals 传进去。
+        """
+        module = sys.modules.get(cls.__module__)
+        if module is not None:
+            return getattr(module, "__dict__", {}) or {}
+        return cls._MODULE_GLOBALS or {}
 
     @classmethod
     def _schema(cls) -> dict[str, type]:
-        return cls._SCHEMA_CACHE.setdefault(cls, get_type_hints(cls))
+        return cls._SCHEMA_CACHE.setdefault(
+            cls, get_type_hints(cls, globalns=cls._resolve_globals())
+        )
 
     @classmethod
     def _fields(cls) -> set[str]:
@@ -170,6 +216,65 @@ class MessageConfig(ConfigNode):
         return str(user_id) in self.protected_user_ids
 
 
+LEGACY_PLUGIN_NAME = "astrbot_plugin_portrayal"
+"""上游/原版插件目录名，用于老数据自动迁移"""
+
+
+def resolve_plugin_name(fallback: str = LEGACY_PLUGIN_NAME) -> str:
+    """取插件当前的**真实目录名**
+
+    注意：`get_astrbot_plugin_path()` 返回的是 plugins 根目录，不是插件自己的目录，
+    所以要按本模块的文件位置往上推：`<plugin_dir>/core/config.py` → `<plugin_dir>`。
+
+    这样本插件被改名 / 做成独立仓库分发时，**面板路由与数据目录**都跟着走，
+    不会因为硬编码旧名字而错位。
+    """
+    try:
+        # 本文件在 <plugin_dir>/core/config.py
+        name = Path(__file__).resolve().parents[1].name
+        if name and name not in (".", "plugins", "core"):
+            return name
+    except Exception:  # pragma: no cover - 取不到就退回默认
+        pass
+    return fallback
+
+
+def _ensure_data_dir(plugin_name: str, legacy_name: str) -> Path:
+    """确保数据目录存在；若只有老目录有数据，自动迁移过来
+
+    这样「改插件目录名 / 换成独立仓库重新安装」不会让已有档案凭空消失。
+    """
+    data_dir = StarTools.get_data_dir(plugin_name)
+    if plugin_name == legacy_name:
+        return data_dir
+
+    try:
+        legacy_dir = StarTools.get_data_dir(legacy_name)
+    except Exception:  # pragma: no cover
+        return data_dir
+
+    if legacy_dir.exists() and legacy_dir != data_dir:
+        moved: list[str] = []
+        for item in legacy_dir.iterdir():
+            target = data_dir / item.name
+            if target.exists():
+                continue
+            try:
+                if item.is_dir():
+                    shutil.copytree(item, target)
+                else:
+                    shutil.copy2(item, target)
+                moved.append(item.name)
+            except Exception as e:  # pragma: no cover - 迁移失败不阻塞启动
+                logger.warning(f"迁移旧数据 {item.name} 失败：{e}")
+        if moved:
+            logger.info(
+                f"已从旧数据目录 {legacy_name} 迁移到 {plugin_name}："
+                f"{'、'.join(moved[:8])}"
+            )
+    return data_dir
+
+
 class PluginConfig(ConfigNode):
     llm: LLMConfig
     message: MessageConfig
@@ -199,8 +304,15 @@ class PluginConfig(ConfigNode):
         super().__init__(cfg)
         self.context = context
 
-        self.data_dir = StarTools.get_data_dir(self._plugin_name)
-        self.plugin_dir = Path(get_astrbot_plugin_path()) / self._plugin_name
+        # 插件真实的目录名（改名分发时数据目录与面板路由都跟着走）
+        self._plugin_name = resolve_plugin_name(self._plugin_name)
+        self.data_dir = _ensure_data_dir(self._plugin_name, LEGACY_PLUGIN_NAME)
+        # 注意 get_astrbot_plugin_path() 返回的是 plugins 根目录，需再拼插件目录名
+        self.plugin_dir = (
+            Path(__file__).resolve().parents[1]
+            if Path(__file__).resolve().parents[1].name == self._plugin_name
+            else Path(get_astrbot_plugin_path()) / self._plugin_name
+        )
         self.cache_dir = self.data_dir / "cache"
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.builtin_prompt_file = self.plugin_dir / "builtin_prompts.yaml"
@@ -225,3 +337,7 @@ class PluginConfig(ConfigNode):
     def get_edit_prompt(self) -> str:
         """获取人格改写指令（配置为空时退回内置文案）"""
         return (self.edit_prompt or "").strip() or DEFAULT_EDIT_PROMPT
+
+
+# 模块加载完成：把 globals 交给 ConfigNode，供 get_type_hints 解析前置引用使用
+ConfigNode._MODULE_GLOBALS = globals()
