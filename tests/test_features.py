@@ -474,6 +474,91 @@ def test_edit_mode_prefix(tmp: Path):
     check("前缀写错时不调 LLM", "edit" not in captured3)
 
 
+def test_bracket_emoji(tmp: Path):
+    print("[方括号表情]")
+    from portrayal_plugin.core.emoji import (
+        bracket_emoji_to_emoji,
+        missing_bracket_tokens,
+        normalize_bot_emoji,
+    )
+
+    # 用户实测的那条：bot 发了 [捂脸]
+    check(
+        "方括号捂脸转 emoji",
+        bracket_emoji_to_emoji("跑实验去了[捂脸]") == "跑实验去了🤦",
+        bracket_emoji_to_emoji("跑实验去了[捂脸]"),
+    )
+    check("方括号大哭", bracket_emoji_to_emoji("[大哭]") == "😭")
+    check("方括号滑稽", bracket_emoji_to_emoji("[滑稽]") == "😏")
+    check("方括号挠头", bracket_emoji_to_emoji("[挠头]") == "🤔")
+    check("句中多个", bracket_emoji_to_emoji("[大哭] 不行 [阴险]") == "😭 不行 😏")
+
+    # 非表情的方括号必须原样保留
+    for raw in (
+        "[回复消息]",
+        "[图片]",
+        "[表情]",
+        "[MSG_ID:123456]",
+        "[CQ:reply,id=1]",
+        "普通[未知词]文本",
+    ):
+        check(f"非表情方括号保留 {raw!r}", bracket_emoji_to_emoji(raw) == raw, bracket_emoji_to_emoji(raw))
+
+    # 未识别的 token 会被登记，便于补映射表
+    from portrayal_plugin.core.emoji import remember_unmapped_bracket_tokens
+
+    remember_unmapped_bracket_tokens("人格里写了[没收录词]")
+    check("未识别 token 被登记", "没收录词" in missing_bracket_tokens(), str(missing_bracket_tokens()))
+
+    # 两种写法一起处理
+    check(
+        "斜杠与方括号同时转",
+        normalize_bot_emoji("好尴尬/擦汗 [捂脸]") == "好尴尬😅 🤦",
+        normalize_bot_emoji("好尴尬/擦汗 [捂脸]"),
+    )
+
+    # 展示层：markdown_to_plain 两种写法都要转，且不能误伤命令
+    from portrayal_plugin.core.chat_text import markdown_to_plain
+
+    check(
+        "展示层转方括号",
+        markdown_to_plain("跑实验去了[捂脸]") == "跑实验去了🤦",
+        markdown_to_plain("跑实验去了[捂脸]"),
+    )
+    check("展示层转斜杠", markdown_to_plain("好尴尬/擦汗") == "好尴尬😅")
+    check("展示层不误伤命令", markdown_to_plain("/reset 命令") == "/reset 命令")
+    check(
+        "展示层不误伤非表情方括号",
+        markdown_to_plain("带 [回复消息] 的句子") == "带 [回复消息] 的句子",
+        markdown_to_plain("带 [回复消息] 的句子"),
+    )
+    check("markdown 与表情混用", markdown_to_plain("**加粗** 和 [捂脸]") == "加粗 和 🤦")
+
+    # 写入路径同样转换
+    from portrayal_plugin.core.persona_service import normalize_persona_text
+
+    check(
+        "写入人格前转方括号",
+        normalize_persona_text("爱用[捂脸]和[滑稽]") == "爱用🤦和😏",
+        normalize_persona_text("爱用[捂脸]和[滑稽]"),
+    )
+
+    # 修复表情命令要把两种写法都修掉
+    plugin = make_plugin(None, tmp)
+    plugin.db.set(
+        UserProfile(
+            user_id="123",
+            nickname="小明",
+            clone_prompt="常说[捂脸]与/擦汗",
+            portrait="画像：[大哭]",
+        )
+    )
+    collect(plugin.fix_emoji_in_personas(FakeEvent("修复表情", [Plain("修复表情")])))
+    prof = plugin.db.get("123")
+    check("修复方括号", prof.clone_prompt == "常说🤦与😅", prof.clone_prompt)
+    check("修复画像里的方括号", prof.portrait == "画像：😭", prof.portrait)
+
+
 def test_fix_emoji_command(tmp: Path):
     print("[修复表情 命令]")
     plugin = make_plugin(None, tmp)
@@ -1375,6 +1460,7 @@ def main():
     test_parsing(tmp)
     test_edit_persona(tmp)
     test_edit_mode_prefix(tmp)
+    test_bracket_emoji(tmp)
     test_fix_emoji_command(tmp)
     test_emoji_normalization(tmp)
     test_message_scan_dedup(tmp)
