@@ -603,20 +603,32 @@ def test_message_scan_dedup(tmp: Path):
 
     # 第 2 页与第 1 页有 2 条重叠（游标重叠的真实场景），并有一页内重复
     pages = [
+        # 第 2 页与第 1 页重叠 2 条；页内还有一条完全重复（id=3 出现两次）
         [msg(1, "100", "a"), msg(2, "100", "b"), msg(3, "200", "c"), msg(3, "200", "c")],
         [msg(2, "100", "b"), msg(3, "200", "c"), msg(4, "100", "d")],
-        [],
     ]
-    calls = {"n": 0}
-
+    # 协议端契约：锚点为 0 取最新一页；否则按传入锚点返回更早的一页。
+    # 同时验证「参数名兼容」——锚点是第一页最早那条时才给下一页，
+    # 传了不被识别的参数名就会一直返回同一批（这正是真实踩到的 bug）。
     class FakeApi:
+        def __init__(self):
+            self.calls: list[dict] = []
+
         async def call_action(self, action, **kwargs):
-            idx = min(calls["n"], len(pages) - 1)
-            calls["n"] += 1
-            return {"messages": pages[idx]}
+            self.calls.append(dict(kwargs))
+            anchor = kwargs.get("message_seq", kwargs.get("message_id", 0)) or 0
+            if int(anchor) == 0:
+                return {"messages": pages[0]}
+            # 协议端契约：锚点 = 已取到的最早一条时，返回更早的一页
+            if int(anchor) == pages[0][0]["message_id"]:
+                return {"messages": pages[1]}
+            # 锚点不认识 / 已经到最早 → 视为翻到底
+            return {"messages": []}
+
+    fake_api = FakeApi()
 
     class FakeBot:
-        api = FakeApi()
+        api = fake_api
 
     class FakeEv:
         def get_group_id(self):
@@ -635,8 +647,13 @@ def test_message_scan_dedup(tmp: Path):
     )
     check("total 与 texts 一致（不再出现 261>200）", result.count == len(result.texts))
 
+    check(
+        "向协议端传了锚点参数",
+        any(("message_seq" in c) or ("message_id" in c) for c in fake_api.calls),
+        str(fake_api.calls[:2]),
+    )
+
     # 再次调用：缓存命中，应直接返回且不再扫描
-    calls["n"] = 0
     again = asyncio.run(mgr.get_user_texts(FakeEv(), "100", max_rounds=3))
     check("二次调用不再重复计数", len(again.texts) == 3, str(again.texts))
     check("二次调用标记来自缓存", again.from_cache is True)
