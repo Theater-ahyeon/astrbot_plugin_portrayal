@@ -313,13 +313,16 @@ def _fake_llm(plugin, *, portrait=None, edit=None):
 
     async def fake_generate_portrait(
         texts, profile, system_prompt_template, *, old_clone_prompt="",
-        merge_prompt_template="", umo=None,
+        merge_prompt_template="", umo=None, old_sample_count=0,
+        merge_strength=1.0,
     ):
         captured["portrait"] = {
             "texts": texts,
             "old_clone_prompt": old_clone_prompt,
             "merge_prompt_template": merge_prompt_template,
             "system_prompt_template": system_prompt_template,
+            "old_sample_count": old_sample_count,
+            "merge_strength": merge_strength,
         }
         return portrait if portrait is not None else "新人格"
 
@@ -675,6 +678,137 @@ def test_message_scan_dedup(tmp: Path):
     cached = legacy._user_cache["999:100"]
     check("旧缓存 ids 补成等长空串", len(cached.ids) == len(cached.texts) == 2, str(cached.ids))
     check("旧缓存追加后仍对齐", cached.add("new", "555") and cached.texts[-1] == "new")
+
+
+def test_merge_weights():
+    print("[融合权重]")
+    from portrayal_plugin.core.llm import (
+        MERGE_WEIGHT_MAX_RATIO,
+        compute_merge_weights,
+        describe_merge_weights,
+    )
+
+    w = compute_merge_weights(100, 100)
+    check("样本相等 → 权重比 1", abs(w["ratio"] - 1.0) < 1e-9, str(w))
+    check("相等时描述为同等重要", "同等重要" in describe_merge_weights(w), describe_merge_weights(w))
+
+    w = compute_merge_weights(1000, 50)
+    check("旧样本多 → 权重比 < 1", w["ratio"] < 1, str(w["ratio"]))
+    check(
+        "旧样本多 → 以旧为主",
+        "基本保留旧描述" in describe_merge_weights(w),
+        describe_merge_weights(w),
+    )
+
+    w = compute_merge_weights(100, 1000)
+    check("新记录多 → 权重比 > 1", w["ratio"] > 1, str(w["ratio"]))
+    check(
+        "新记录多 → 以新为主",
+        "应以新记录为主" in describe_merge_weights(w),
+        describe_merge_weights(w),
+    )
+
+    # 极端情况：新记录远超旧样本，比例要封顶
+    w = compute_merge_weights(10, 100000)
+    check("权重比封顶", abs(w["ratio"] - MERGE_WEIGHT_MAX_RATIO) < 1e-9, str(w["ratio"]))
+    check("封顶会标明", "封顶" in describe_merge_weights(w))
+
+    # 旧样本未知（老数据 / 手工写入）：按与本次相当估计，且提示出来
+    w = compute_merge_weights(0, 200)
+    check("旧样本未知时按本次规模估计", abs(w["ratio"] - 1.0) < 1e-9, str(w))
+    check("旧样本未知会提示", "没有样本计数记录" in describe_merge_weights(w))
+
+    # 强度系数
+    w = compute_merge_weights(100, 100, strength=2.0)
+    check("强度 2.0 → 比例翻倍", abs(w["ratio"] - 2.0) < 1e-9, str(w["ratio"]))
+    w = compute_merge_weights(100, 100, strength=0.5)
+    check("强度 0.5 → 比例减半", abs(w["ratio"] - 0.5) < 1e-9, str(w["ratio"]))
+    w = compute_merge_weights(100, 100, strength="bad")
+    check("强度非法回落 1.0", abs(w["ratio"] - 1.0) < 1e-9)
+    w = compute_merge_weights(100, 100, strength=0)
+    check("强度 0 回落 1.0", abs(w["ratio"] - 1.0) < 1e-9)
+    w = compute_merge_weights(-5, -5)
+    check("负数样本不炸", w["ratio"] > 0, str(w))
+
+    check("描述含条数", "1000" in describe_merge_weights(compute_merge_weights(1000, 50)))
+
+
+def test_sample_count_accumulation():
+    print("[样本条数累计]")
+    from portrayal_plugin.main import (
+        MAX_SAMPLE_GROWTH_RATIO,
+        MAX_SAMPLE_TOTAL,
+        _accumulate_sample_count,
+    )
+
+    check("首次直接采用", _accumulate_sample_count(0, 200) == 200)
+    check("正常累加", _accumulate_sample_count(200, 100) == 300)
+    check(
+        "单轮放大受倍数封顶",
+        _accumulate_sample_count(100, 100000) == 100 + int(100 * MAX_SAMPLE_GROWTH_RATIO),
+        str(_accumulate_sample_count(100, 100000)),
+    )
+    check("总量封顶", _accumulate_sample_count(MAX_SAMPLE_TOTAL, 10) == MAX_SAMPLE_TOTAL)
+    check("脏数据不炸", _accumulate_sample_count(None, "x") == 0)
+
+
+def test_merge_prompt_has_weights(tmp: Path):
+    print("[融合提示词带权重]")
+    plugin = make_plugin(None, tmp)
+
+    async def fake_get_user_texts(event, target_id, *, max_rounds):
+        class R:
+            texts = ["你好", "在吗", "困了"]
+            scanned_messages = 600
+            from_cache = False
+            count = 3
+            is_empty = False
+
+            def normalized_texts(self):
+                return list(self.texts)
+
+        return R()
+
+    plugin.msg.get_user_texts = fake_get_user_texts
+    plugin.db.set(
+        UserProfile(
+            user_id="123",
+            nickname="小明",
+            clone_prompt="旧人格内容",
+            clone_sample_count=900,
+        )
+    )
+
+    # 直接验证提示词构造（不经过假 LLM）
+    from portrayal_plugin.core.llm import LLMService, compute_merge_weights
+
+    svc = plugin.llm
+    weights = compute_merge_weights(900, 3)
+    prompt = svc._build_merge_prompt(
+        ["a", "b"], plugin.db.get("123"), "旧人格内容", "融合指令 {nickname}", weights=weights
+    )
+    check("提示词含权重块", "证据权重" in prompt, prompt[:200])
+    check("提示词写出旧样本数", "900" in prompt, prompt[:400])
+    check("提示词写出新旧权重比", "权重比" in prompt)
+    check("提示词含旧人格正文", "旧人格内容" in prompt)
+    check("提示词含新记录", "聊天记录开始" in prompt)
+
+    # 不传 weights 时保持兼容（没有权重块）
+    plain = svc._build_merge_prompt(["a"], plugin.db.get("123"), "旧", "模板")
+    check("无权重参数时不插块", "证据权重" not in plain)
+
+    # 端到端：融合时把「旧样本数」传给了 LLM 层
+    captured = _fake_llm(plugin, portrait="融合后")
+    collect(plugin.get_portrayal(FakeEvent("克隆人格 @用户", [Plain("克隆人格 "), At("123")])))
+    check(
+        "融合时传入旧样本数",
+        captured["portrait"]["old_sample_count"] == 900,
+        str(captured["portrait"].get("old_sample_count")),
+    )
+    check("融合时传入强度", "merge_strength" in captured["portrait"])
+    prof = plugin.db.get("123")
+    check("融合后累计样本数增加", prof.clone_sample_count == 900 + 3, str(prof.clone_sample_count))
+    check("记录了构建时间", bool(prof.clone_built_at))
 
 
 def test_markdown_to_plain():
@@ -1244,6 +1378,9 @@ def main():
     test_fix_emoji_command(tmp)
     test_emoji_normalization(tmp)
     test_message_scan_dedup(tmp)
+    test_merge_weights()
+    test_sample_count_accumulation()
+    test_merge_prompt_has_weights(tmp)
     test_markdown_to_plain()
     test_reset_on_empty_clone(tmp)
     test_switch_named_persona(tmp)
