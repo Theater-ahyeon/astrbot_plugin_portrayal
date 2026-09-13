@@ -80,7 +80,7 @@
   // 端点统一用**裸路径**（如 "overview"、"user/123"）：
   // 宿主桥接会自动补上插件前缀（apiGet("stats") -> /api/plug/<plugin>/stats），
   // 如果这里再带一次插件名就会变成双重前缀，服务端必然报「未找到该路由」。
-  function request(method, endpoint, params, body) {
+  function apiFetch(method, endpoint, params, body) {
     var token = assetToken();
     if (!token) return null; // 没有 token 就交给桥接
     var url = new URL(
@@ -200,7 +200,7 @@
           return bridge().apiGet(e);
         },
         function (e) {
-          return request("GET", e);
+          return apiFetch("GET", e);
         },
         "读取总览失败"
       );
@@ -222,7 +222,7 @@
           return bridge().apiGet(e, q);
         },
         function (e) {
-          return request("GET", e, q);
+          return apiFetch("GET", e, q);
         },
         "读取列表失败"
       );
@@ -238,7 +238,7 @@
           return bridge().apiGet(e);
         },
         function (e) {
-          return request("GET", e);
+          return apiFetch("GET", e);
         },
         "读取档案失败"
       );
@@ -255,7 +255,7 @@
           return bridge().apiPost(e, payload);
         },
         function (e) {
-          return request("POST", e, null, payload);
+          return apiFetch("POST", e, null, payload);
         },
         "保存失败"
       );
@@ -272,7 +272,7 @@
           return bridge().apiPost(e, payload);
         },
         function (e) {
-          return request("POST", e, null, payload);
+          return apiFetch("POST", e, null, payload);
         },
         "生成失败"
       );
@@ -288,7 +288,7 @@
           return bridge().apiGet(e);
         },
         function (e) {
-          return request("GET", e);
+          return apiFetch("GET", e);
         },
         "读取缓存候选失败"
       );
@@ -317,7 +317,6 @@
       if (v === false || v === null || v === undefined) return;
       if (k === "class") node.className = v;
       else if (k === "text") node.textContent = v;
-      else if (k === "html") node.innerHTML = v;
       else if (k.slice(0, 2) === "on") node.addEventListener(k.slice(2), v);
       else node.setAttribute(k, v === true ? "" : String(v));
     });
@@ -478,7 +477,7 @@
         });
       };
       var viaDirect = function () {
-        var r = request("POST", ep, null, payload);
+        var r = apiFetch("POST", ep, null, payload);
         return r || Promise.resolve(null);
       };
       return viaBridge().catch(function () {
