@@ -463,7 +463,8 @@
           }
         })(),
         hasToken: !!assetToken(),
-        href: String(window.location.href).slice(0, 200),
+        // The query can contain asset_token; never write it to panel_debug.log.
+        href: String(window.location.href).split(/[?#]/, 1)[0].slice(0, 200),
         hasBridge: !!(window.AstrBotPluginPage && window.AstrBotPluginPage.apiGet),
         ua: navigator.userAgent.slice(0, 80),
       };
